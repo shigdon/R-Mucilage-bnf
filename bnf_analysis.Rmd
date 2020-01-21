@@ -75,6 +75,7 @@ smash_lca_whole_genomes$genus <- sub("^$", "unassigned", smash_lca_whole_genomes
 ```{r}
 # create new dataframe
 single_isolates <- metabat_bins %>% select( "bcw_id", "ID", "n_bins")
+## modify to match other records
 single_isolates$bcw_id <- sub("_", "-", single_isolates$bcw_id)
 
 # add genus data
@@ -155,7 +156,7 @@ colnames(sm_k31_cmp_mat) <- sm_k31_cmp$tx_name
 
 ```
 
-## PGP Master Dataframe
+## BNF Master Dataframe
 
 > Make a data frame with results from:
 
@@ -210,10 +211,6 @@ single_isolates_complete_cases <- data.frame(BCW_ID = pgp_master$BCW_ID)
 
 # add sm_k31_cmp data to pgp_master
 pgp_master <- cbind(sm_k31_cmp_mat, pgp_master)
-
-pgp_master %>%
-  group_by(Genus ) %>%
-  count()
 
 str(pgp_master[,493:500])
 ```
@@ -331,80 +328,6 @@ ggsave("./Plots/bnf_rot.pdf", bnf_rot, width = 22, height = 14)
 
 ## NIF Groups
 
-### NIF Group BNF DF
-
-> Make a data frame with results from:
-
-1. 15N Assay
-
-2. Sourmash Comparisons
-
-#### Make the Data Frame
-```{r}
-# Make pgp master dataframe
-pgp_master <- data.frame(TX_ID=sm_k31_cmp$tx_name)
-
-# add BCW ids
-pgp_master$BCW_ID <- sm_k31_cmp$bcw_id
-
-# add ABB ids
-pgp_master$ABB_ID <- abb_bcw_labels$ABB_ID[match(pgp_master$BCW_ID, abb_bcw_labels$BCW_ID)]
-
-# add N15 ratio values for each isolate
-pgp_master$`BNF` <- pgp_15N$ratio[match(pgp_master$BCW_ID, pgp_15N$BCW_ID)]
-
-# add Genus classification for each isolate
-pgp_master$Genus <- smash_lca_whole_genomes$genus[match(pgp_master$BCW_ID, smash_lca_whole_genomes$bcw_id)]
-pgp_master$Genus <- as.factor(pgp_master$Genus) # coerce to factor
-
-## assign a unique color to each genus
-set.seed(8888)
-pgp_genus_colors <- data.frame(Genus = unique(pgp_master$Genus), Color =  distinctColorPalette(length(unique(pgp_master$Genus))))
-
-# add phylum classification for each isolate
-pgp_master$Phylum <- smash_lca_whole_genomes$phylum[match(pgp_master$BCW_ID, smash_lca_whole_genomes$bcw_id)]
-
-## assign a unique color to each phylum
-set.seed(1234)
-pgp_phylum_colors <- data.frame(Phylum = unique(pgp_master$Phylum), Color =  distinctColorPalette(length(unique(pgp_master$Phylum))))
-
-### match Genus
-pgp_master$Genus_Color <- pgp_genus_colors$Color[match(pgp_master$Genus, pgp_genus_colors$Genus)]
-
-### match Phylum
-pgp_master$Phylum_Color <- pgp_phylum_colors$Color[match(pgp_master$Phylum, pgp_phylum_colors$Phylum)]
-
-## change number of significant digits for numeric values to 3
-pgp_master <- pgp_master %>% mutate_if(is.numeric, round, digits = 3)
-
-# Remove incomplete cases (Isolates with NA values for bnf assays)
-#pgp_master <- drop_na(pgp_master)
-
-# Create list of isolates with complete pgp cases
-single_isolates_complete_cases <- data.frame(BCW_ID = pgp_master$BCW_ID)
-#write_csv(single_isolates_complete_cases, "./R_output_files/single_isolates_complete_cases.csv", col_names = F)
-
-# add sm_k31_cmp data to pgp_master
-pgp_master <- cbind(sm_k31_cmp_mat, pgp_master)
-
-pgp_master %>%
-  group_by(Genus ) %>%
-  count()
-
-str(pgp_master[,493:500])
-```
-
-#### Add DS Group Info to PGP Master
-```{r}
-# read in dos santos group membership metadata file
- ds_groups <- read_csv("./genome_metadata/ds_groups.csv", col_types = "cf")
-
-# add ds group to each row of pgp master
-pgp_master$nif_group <- ds_groups$group[match(pgp_master$BCW_ID, ds_groups$bcw_id)]
-
-```
-
-
 > Read Sourmash K31 Compare Data for Each NIF Group
 
 ### Dos-Santos Positive (DSP) - Group A
@@ -422,7 +345,7 @@ smash_dsp_cmp$bcw_id <- abb_bcw_labels$BCW_ID[match(rownames(smash_dsp_cmp), abb
 smash_dsp_cmp$Genus <- smash_lca_whole_genomes$genus[match(smash_dsp_cmp$bcw_id, smash_lca_whole_genomes$bcw_id)]
 
 # add tx_name Variable to smash_dsp_cmp
-smash_dsp_cmp$tx_name <- paste(smash_dsp_cmp$genus, sprintf("sp. %s", smash_dsp_cmp$bcw_id))
+smash_dsp_cmp$tx_name <- paste(smash_dsp_cmp$Genus, sprintf("sp. %s", smash_dsp_cmp$bcw_id))
 
 # add BNF value
 smash_dsp_cmp$BNF <- pgp_15N$ratio[match(smash_dsp_cmp$bcw_id, pgp_15N$BCW_ID)]
@@ -475,7 +398,7 @@ smash_sds_cmp$bcw_id <- abb_bcw_labels$BCW_ID[match(rownames(smash_sds_cmp), abb
 smash_sds_cmp$Genus <- smash_lca_whole_genomes$genus[match(smash_sds_cmp$bcw_id, smash_lca_whole_genomes$bcw_id)]
 
 # add tx_name Variable to smash_sds_cmp
-smash_sds_cmp$tx_name <- paste(smash_sds_cmp$genus, sprintf("sp. %s", smash_sds_cmp$bcw_id))
+smash_sds_cmp$tx_name <- paste(smash_sds_cmp$Genus, sprintf("sp. %s", smash_sds_cmp$bcw_id))
 
 # add BNF value
 smash_sds_cmp$BNF <- pgp_15N$ratio[match(smash_sds_cmp$bcw_id, pgp_15N$BCW_ID)]
@@ -528,7 +451,7 @@ smash_dsn_cmp$bcw_id <- abb_bcw_labels$BCW_ID[match(rownames(smash_dsn_cmp), abb
 smash_dsn_cmp$Genus <- smash_lca_whole_genomes$genus[match(smash_dsn_cmp$bcw_id, smash_lca_whole_genomes$bcw_id)]
 
 # add tx_name Variable to smash_dsn_cmp
-smash_dsn_cmp$tx_name <- paste(smash_dsn_cmp$genus, sprintf("sp. %s", smash_dsn_cmp$bcw_id))
+smash_dsn_cmp$tx_name <- paste(smash_dsn_cmp$Genus, sprintf("sp. %s", smash_dsn_cmp$bcw_id))
 
 # add BNF value
 smash_dsn_cmp$BNF <- pgp_15N$ratio[match(smash_dsn_cmp$bcw_id, pgp_15N$BCW_ID)]
@@ -568,8 +491,6 @@ sm_dsn_k31_tree <- ggtree(smash_dsn_k31_phylo,
 ```
 
 ### Cowplot NIF Group ggtrees
-
-> Need to remove geom_tiplab for grid plotting
 
 ##### DSP Isolates - no tip
 ```{r}
