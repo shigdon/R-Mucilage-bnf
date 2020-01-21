@@ -1,0 +1,978 @@
+---
+title: "Fig2_PGP_Analysis"
+author: "Shawn Higdon"
+date: "2/10/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Libraries
+```{r, message=FALSE}
+library(treeio)
+library(ggtree)
+library(ggnewscale)
+library(ComplexHeatmap)
+library(tidyverse)
+library(dendextend)
+library(ape)
+library(circlize)
+library(viridis)
+library(randomcoloR)
+library(RColorBrewer)
+library(cowplot)
+```
+
+# Read in Genome Metadata
+
+> ABB to BCW Genome ID Map
+
+> Metabat Bin Count per Isolate
+
+> Sourmash LCA Classification Data
+
+> Genome Assembly Statistics: Quast output and coverage estimation
+
+```{r}
+# ABB to BCW ID MAP
+abb_bcw_labels <- read.csv("./genome_metadata/abb_genome_bcw_labels.csv", header = T)
+
+# METABAT BIN INFO
+metabat_bins <- read_csv("./genome_metadata/metabat_bin_count.csv", col_names = c("ID", "n_bins"))
+
+# Sourmash LCA Genome Classification Data
+smash_lca_whole_genomes <- read.csv("./sourmash_data/sm-lca-whole_genomes-all-k31.csv", header = T)
+
+# Read in quast Summary for all isolate assemblies done with MEgahit
+asm_stats <- read_tsv("genome_metadata/assembly_stats/all_quast_reports.tsv") # includes eukaryotic isolates
+
+# Read in assembly coverage stat table
+asm_cov <- read.table("genome_metadata/assembly_stats/avg_coverage.tsv", header = T)
+
+# Add AVG_COV to asm_stats
+asm_stats <- inner_join(asm_stats, asm_cov, by = "Assembly")
+
+```
+
+## Add BCW labels to all metadata files
+```{r}
+# Add BCW label to metabat bin DF
+metabat_bins$bcw_id <- abb_bcw_labels$BCW_ID[match(metabat_bins$ID, abb_bcw_labels$ABB_ID)]
+
+# Add BCW label to sourmash lca data
+smash_lca_whole_genomes$bcw_id <- abb_bcw_labels$BCW_ID[match(smash_lca_whole_genomes$ID, abb_bcw_labels$ABB_ID)]
+
+## change '_' to '-' for bcw_id
+smash_lca_whole_genomes$bcw_id <- sub("_", "-", smash_lca_whole_genomes$bcw_id)
+
+## empty cells are 'unassigned'
+smash_lca_whole_genomes$genus <- sub("^$", "unassigned", smash_lca_whole_genomes$genus)
+```
+
+## Generate list of bacterial isolates with single genome bin
+```{r}
+# create new dataframe
+single_isolates <- metabat_bins %>% select( "bcw_id", "ID", "n_bins")
+single_isolates$bcw_id <- sub("_", "-", single_isolates$bcw_id)
+
+# add genus data
+single_isolates$genus <- smash_lca_whole_genomes$genus[match(single_isolates$bcw_id, smash_lca_whole_genomes$bcw_id)]
+
+# add phylum data
+single_isolates$phylum <- smash_lca_whole_genomes$phylum[match(single_isolates$bcw_id, smash_lca_whole_genomes$bcw_id)]
+
+# empty cells for genus are 'unassigned'
+single_isolates$genus <- sub("^$", "unassigned", single_isolates$genus)
+
+# empty cells for Phylum are 'unassigned'
+single_isolates$phylum <- sub("^$", "unassigned", single_isolates$phylum)
+
+# remove eukaryotes
+single_isolates <- single_isolates %>% filter(genus != "Meyerozyma" &
+                                                genus != "Rhodotorula")
+# remove isolates that were pulled apart
+single_isolates <- single_isolates %>% filter(bcw_id != "BCW_201831.1" &
+                                                bcw_id != "BCW_201831.2" &
+                                                bcw_id != "BCW_200557.1" &
+                                                bcw_id != "BCW_200557.2")
+# Keep only isolates with 1 genomic bin
+single_isolates <- single_isolates %>% filter(n_bins == 1)
+
+# add abb_ids
+single_isolates$abb_id <- abb_bcw_labels$ABB_ID[match(single_isolates$bcw_id, abb_bcw_labels$BCW_ID)]
+
+# change '_' to '-' for bcw_id
+single_isolates$bcw_id <- sub("_", "-", single_isolates$bcw_id)
+
+```
+
+## BNF Assay Data
+
+> Read in the Data for BNF assay
+
+```{r, message=FALSE}
+
+# Read in the BNF Assay raw data file
+pgp_15N <- read_csv("./pgp_data/PGP_15N.csv")
+
+## change '_' to '-' for bcw_id of pgp_15N
+pgp_15N$BCW_ID <- sub("_", "-", pgp_15N$BCW_ID)
+```
+
+### Sourmash Compare Data
+
+> Read in comparative matrix and associated data from Sourmash comparison of whole genome sequences.
+
+```{r}
+# read in sourmash k31 compare matrix for single isolate genomes
+sm_k31_cmp <- read.csv("sourmash_data/pure_isolate_492_cmp/pure_isolate_k31_cmp_492.csv", header=T, check.names = F)
+
+# set rownames to colnames
+rownames(sm_k31_cmp) <- colnames(sm_k31_cmp)
+#head(rownames(sm_k31_cmp))
+
+# add bcw ids to sm_k31_cmp data frame
+
+## change '_' to '-' for BCW ids
+abb_bcw_labels$BCW_ID <- sub("_", "-", abb_bcw_labels$BCW_ID)
+
+## match BCW ids
+sm_k31_cmp$bcw_id <- abb_bcw_labels$BCW_ID[match(rownames(sm_k31_cmp), abb_bcw_labels$BCW_ID)]
+
+# add genus info to sm_k31
+sm_k31_cmp$genus <- single_isolates$genus[match(sm_k31_cmp$bcw_id, single_isolates$bcw_id)]
+
+# Create tx_name Variable with Hybrid genus + Isolate Name: GENUS sp. BCWXXXX
+sm_k31_cmp$tx_name <- paste(sm_k31_cmp$genus, sprintf("sp. %s", sm_k31_cmp$bcw_id))
+
+# create matrix
+sm_k31_cmp_mat <- as.matrix(sm_k31_cmp[,1:492])
+
+rownames(sm_k31_cmp_mat) <- sm_k31_cmp$tx_name
+colnames(sm_k31_cmp_mat) <- sm_k31_cmp$tx_name
+
+```
+
+## PGP Master Dataframe
+
+> Make a data frame with results from:
+
+1. 15N Assay
+
+2. Sourmash Comparisons
+
+### Make the Data Frame
+```{r}
+# Make pgp master dataframe
+pgp_master <- data.frame(TX_ID=sm_k31_cmp$tx_name)
+
+# add BCW ids
+pgp_master$BCW_ID <- sm_k31_cmp$bcw_id
+
+# add ABB ids
+pgp_master$ABB_ID <- abb_bcw_labels$ABB_ID[match(pgp_master$BCW_ID, abb_bcw_labels$BCW_ID)]
+
+# add N15 ratio values for each isolate
+pgp_master$`BNF` <- pgp_15N$ratio[match(pgp_master$BCW_ID, pgp_15N$BCW_ID)]
+
+# add Genus classification for each isolate
+pgp_master$Genus <- smash_lca_whole_genomes$genus[match(pgp_master$BCW_ID, smash_lca_whole_genomes$bcw_id)]
+pgp_master$Genus <- as.factor(pgp_master$Genus) # coerce to factor
+
+## assign a unique color to each genus
+set.seed(8888)
+pgp_genus_colors <- data.frame(Genus = unique(pgp_master$Genus), Color =  distinctColorPalette(length(unique(pgp_master$Genus))))
+
+# add phylum classification for each isolate
+pgp_master$Phylum <- smash_lca_whole_genomes$phylum[match(pgp_master$BCW_ID, smash_lca_whole_genomes$bcw_id)]
+
+## assign a unique color to each phylum
+set.seed(1234)
+pgp_phylum_colors <- data.frame(Phylum = unique(pgp_master$Phylum), Color =  distinctColorPalette(length(unique(pgp_master$Phylum))))
+
+### match Genus
+pgp_master$Genus_Color <- pgp_genus_colors$Color[match(pgp_master$Genus, pgp_genus_colors$Genus)]
+
+### match Phylum
+pgp_master$Phylum_Color <- pgp_phylum_colors$Color[match(pgp_master$Phylum, pgp_phylum_colors$Phylum)]
+
+## change number of significant digits for numeric values to 3
+pgp_master <- pgp_master %>% mutate_if(is.numeric, round, digits = 3)
+
+# Remove incomplete cases (Isolates with NA values for bnf assays)
+#pgp_master <- drop_na(pgp_master)
+
+# Create list of isolates with complete pgp cases
+single_isolates_complete_cases <- data.frame(BCW_ID = pgp_master$BCW_ID)
+#write_csv(single_isolates_complete_cases, "./R_output_files/single_isolates_complete_cases.csv", col_names = F)
+
+# add sm_k31_cmp data to pgp_master
+pgp_master <- cbind(sm_k31_cmp_mat, pgp_master)
+
+pgp_master %>%
+  group_by(Genus ) %>%
+  count()
+
+str(pgp_master[,493:500])
+```
+
+> Used list of 492 isolates with single bin genomes to perform `sourmash compare`.
+
+```
+sourmash compare -k 31
+```
+### All Single Isolates
+```{r}
+# Create Phylo Tree from sourmash matrix
+
+sm_k31_tree_mat <- dist2(sm_k31_cmp_mat)
+
+sm_k31_tree_fit <- hclust(sm_k31_tree_mat)
+
+sm_k31_phylo <- as.phylo(sm_k31_tree_fit)
+
+# set rownames of pgp_master to match tree tip labels
+rownames(pgp_master) <- sm_k31_phylo$tip.label
+
+head(rownames(pgp_master))
+
+colnames(pgp_master[,493:500])
+
+levels(pgp_master$Genus)
+```
+
+#### BNF Phenotype Tree
+```{r}
+# Make tree
+sm_k31_tree_o15 <- ggtree(sm_k31_phylo, color = "black", size = 0.3, layout = "fan", open.angle = 15)
+
+# Genus Tree
+bnf0_notip <- gheatmap(sm_k31_tree_o15, pgp_master[, "Genus", drop = F],
+                     offset = 0,
+                     width = 0.05,
+                     colnames_position = "top",
+                     colnames_angle = 0,
+                     colnames_offset_y = 9.5,
+                     font.size = 5.5,
+                     color = "grey50") + 
+  scale_fill_manual(values=c("#E6BE53",
+                             "#CAD773",
+                             "#81D870",
+                             "#8F3EE4",
+                             "#E25F9D",
+                             "#D8E9D6",
+                             "#72A890",
+                             "#CDEC4C",
+                             "#C59D6B",
+                             "#86D6E1",
+                             "#77E94F",
+                             "#81748E",
+                             "#64E7A9",
+                             "#D3D0E3",
+                             "#767CDE",
+                             "#7DAEDE",
+                             "#E2684F",
+                             "#E1ABAA",
+                             "#7BEFDF",
+                             "#DA47D2",
+                             "#D7A7DF",
+                             "#E5DEA8",
+                             "#B4E3A7",
+                             "#CF7DDC"),
+                    name = "Genus",
+                    guide = guide_legend(
+                      direction = "vertical",
+                      ncol = 2,
+                      title.position = "top",
+                      title.theme = element_text(size = 18, hjust = 0.5),
+                      label.position = "right",
+                      label.theme = element_text(size = 14)
+                      )) + theme(legend.title = element_text(),
+                                 legend.key.size = unit(.5, "cm"))
+
+bnf_p0 <- bnf0_notip + new_scale_fill()
+
+# Add gheatmap 1 for BNF Ratio Data
+
+bnf_p1 <- gheatmap(bnf_p0, pgp_master[, "BNF", drop = F],
+                     offset = 0.25,
+                     width = 0.05,
+                     colnames_position = "top",
+                     colnames_angle = 0,
+                     colnames_offset_y = 9.5,
+                     font.size = 5.5,
+                     color = "grey50") + 
+     scale_fill_viridis_c(option = "inferno",
+                       direction = -1,
+                       name = "BNF (15N/14N Ratio)",
+                       limits = c(0, 5),
+                       breaks = c(0, 1, 2, 3, 4, 5),
+                       guide = guide_colorbar(
+                         direction = "horizontal",
+                         title.position = "top",
+                         title.theme = element_text(size = 18, hjust = 0.5),
+                         barwidth = 18,
+                         label.position = "bottom",
+                         label.theme = element_text(size = 14)
+                         )
+                       ) +
+  theme(legend.title = element_text(), legend.position = "right")
+
+
+
+bnf_rot <- print(rotate_tree(bnf_p1, -82))
+
+# save plot
+ggsave("./Plots/bnf_rot.pdf", bnf_rot, width = 22, height = 14)
+
+```
+
+## NIF Groups
+
+### NIF Group BNF DF
+
+> Make a data frame with results from:
+
+1. 15N Assay
+
+2. Sourmash Comparisons
+
+#### Make the Data Frame
+```{r}
+# Make pgp master dataframe
+pgp_master <- data.frame(TX_ID=sm_k31_cmp$tx_name)
+
+# add BCW ids
+pgp_master$BCW_ID <- sm_k31_cmp$bcw_id
+
+# add ABB ids
+pgp_master$ABB_ID <- abb_bcw_labels$ABB_ID[match(pgp_master$BCW_ID, abb_bcw_labels$BCW_ID)]
+
+# add N15 ratio values for each isolate
+pgp_master$`BNF` <- pgp_15N$ratio[match(pgp_master$BCW_ID, pgp_15N$BCW_ID)]
+
+# add Genus classification for each isolate
+pgp_master$Genus <- smash_lca_whole_genomes$genus[match(pgp_master$BCW_ID, smash_lca_whole_genomes$bcw_id)]
+pgp_master$Genus <- as.factor(pgp_master$Genus) # coerce to factor
+
+## assign a unique color to each genus
+set.seed(8888)
+pgp_genus_colors <- data.frame(Genus = unique(pgp_master$Genus), Color =  distinctColorPalette(length(unique(pgp_master$Genus))))
+
+# add phylum classification for each isolate
+pgp_master$Phylum <- smash_lca_whole_genomes$phylum[match(pgp_master$BCW_ID, smash_lca_whole_genomes$bcw_id)]
+
+## assign a unique color to each phylum
+set.seed(1234)
+pgp_phylum_colors <- data.frame(Phylum = unique(pgp_master$Phylum), Color =  distinctColorPalette(length(unique(pgp_master$Phylum))))
+
+### match Genus
+pgp_master$Genus_Color <- pgp_genus_colors$Color[match(pgp_master$Genus, pgp_genus_colors$Genus)]
+
+### match Phylum
+pgp_master$Phylum_Color <- pgp_phylum_colors$Color[match(pgp_master$Phylum, pgp_phylum_colors$Phylum)]
+
+## change number of significant digits for numeric values to 3
+pgp_master <- pgp_master %>% mutate_if(is.numeric, round, digits = 3)
+
+# Remove incomplete cases (Isolates with NA values for bnf assays)
+#pgp_master <- drop_na(pgp_master)
+
+# Create list of isolates with complete pgp cases
+single_isolates_complete_cases <- data.frame(BCW_ID = pgp_master$BCW_ID)
+#write_csv(single_isolates_complete_cases, "./R_output_files/single_isolates_complete_cases.csv", col_names = F)
+
+# add sm_k31_cmp data to pgp_master
+pgp_master <- cbind(sm_k31_cmp_mat, pgp_master)
+
+pgp_master %>%
+  group_by(Genus ) %>%
+  count()
+
+str(pgp_master[,493:500])
+```
+
+#### Add DS Group Info to PGP Master
+```{r}
+# read in dos santos group membership metadata file
+ ds_groups <- read_csv("./genome_metadata/ds_groups.csv", col_types = "cf")
+
+# add ds group to each row of pgp master
+pgp_master$nif_group <- ds_groups$group[match(pgp_master$BCW_ID, ds_groups$bcw_id)]
+
+```
+
+
+> Read Sourmash K31 Compare Data for Each NIF Group
+
+### Dos-Santos Positive (DSP) - Group A
+```{r}
+# DSP Group
+smash_dsp_cmp <- read.csv("./sourmash_data/dsp_dos-santos-positive/pure_iso_dsp_k31_cmp.csv", header = TRUE, check.names = FALSE)
+
+# set rownames to colnames
+rownames(smash_dsp_cmp) <- colnames(smash_dsp_cmp)
+
+# add bcw ids to smash_dsp_cmp data frame
+smash_dsp_cmp$bcw_id <- abb_bcw_labels$BCW_ID[match(rownames(smash_dsp_cmp), abb_bcw_labels$BCW_ID)]
+
+# add genus info to smash_dsp_cmp
+smash_dsp_cmp$Genus <- smash_lca_whole_genomes$genus[match(smash_dsp_cmp$bcw_id, smash_lca_whole_genomes$bcw_id)]
+
+# add tx_name Variable to smash_dsp_cmp
+smash_dsp_cmp$tx_name <- paste(smash_dsp_cmp$genus, sprintf("sp. %s", smash_dsp_cmp$bcw_id))
+
+# add BNF value
+smash_dsp_cmp$BNF <- pgp_15N$ratio[match(smash_dsp_cmp$bcw_id, pgp_15N$BCW_ID)]
+
+# set rownames to match sample
+rownames(smash_dsp_cmp) <- smash_dsp_cmp$tx_name
+
+# create matrices for tree
+
+## sourmash compare matrix
+smash_dsp_cmp_mat <- as.matrix(smash_dsp_cmp[,1:193])
+rownames(smash_dsp_cmp_mat) <- smash_dsp_cmp$tx_name
+colnames(smash_dsp_cmp_mat) <- rownames(smash_dsp_cmp_mat)
+
+```
+
+#### DSP tree objects
+```{r}
+# Create Phylo Tree from sourmash matrix
+
+smash_dsp_k31_tree_mat <- dist2(smash_dsp_cmp_mat)
+smash_dsp_k31_tree_fit <- hclust(smash_dsp_k31_tree_mat)
+smash_dsp_k31_phylo <- as.phylo(smash_dsp_k31_tree_fit)
+
+```
+
+
+#### DSP ggtree
+```{r}
+# Make tree
+sm_dsp_k31_tree <- ggtree(smash_dsp_k31_phylo,
+                          color = "black",
+                          size = 0.4,
+                          layout = "fan",
+                          open.angle = 15)
+```
+
+### Semi Dos-Santos (SDS) - Group B
+```{r}
+# SDS Group
+smash_sds_cmp <- read.csv("./sourmash_data/sds_semi-dos-santos/pure_iso_sds_k31_cmp.csv", header = TRUE, check.names = FALSE)
+
+# set rownames to colnames
+rownames(smash_sds_cmp) <- colnames(smash_sds_cmp)
+
+# add bcw ids to smash_sds_cmp data frame
+smash_sds_cmp$bcw_id <- abb_bcw_labels$BCW_ID[match(rownames(smash_sds_cmp), abb_bcw_labels$BCW_ID)]
+
+# add genus info to smash_sds_cmp
+smash_sds_cmp$Genus <- smash_lca_whole_genomes$genus[match(smash_sds_cmp$bcw_id, smash_lca_whole_genomes$bcw_id)]
+
+# add tx_name Variable to smash_sds_cmp
+smash_sds_cmp$tx_name <- paste(smash_sds_cmp$genus, sprintf("sp. %s", smash_sds_cmp$bcw_id))
+
+# add BNF value
+smash_sds_cmp$BNF <- pgp_15N$ratio[match(smash_sds_cmp$bcw_id, pgp_15N$BCW_ID)]
+
+# set rownames to match sample
+rownames(smash_sds_cmp) <- smash_sds_cmp$tx_name
+
+# create matrices for tree
+
+## sourmash compare matrix
+smash_sds_cmp_mat <- as.matrix(smash_sds_cmp[,1:66])
+rownames(smash_sds_cmp_mat) <- smash_sds_cmp$tx_name
+colnames(smash_sds_cmp_mat) <- rownames(smash_sds_cmp_mat)
+
+```
+
+#### SDS tree objects
+```{r}
+# Create Phylo Tree from sourmash matrix
+
+smash_sds_k31_tree_mat <- dist2(smash_sds_cmp_mat)
+smash_sds_k31_tree_fit <- hclust(smash_sds_k31_tree_mat)
+smash_sds_k31_phylo <- as.phylo(smash_sds_k31_tree_fit)
+
+```
+
+
+#### SDS ggtree
+```{r}
+# Make tree
+sm_sds_k31_tree <- ggtree(smash_sds_k31_phylo,
+                          color = "black",
+                          size = 0.4,
+                          layout = "fan",
+                          open.angle = 15)
+```
+
+### Dos-Santos Negative (DSN) - Group C
+```{r}
+# DSN Group
+smash_dsn_cmp <- read.csv("./sourmash_data/dsn_dos-santos-negative/pure_iso_dsn_k31_cmp.csv", header = TRUE, check.names = FALSE)
+
+# set rownames to colnames
+rownames(smash_dsn_cmp) <- colnames(smash_dsn_cmp)
+
+# add bcw ids to smash_dsn_cmp data frame
+smash_dsn_cmp$bcw_id <- abb_bcw_labels$BCW_ID[match(rownames(smash_dsn_cmp), abb_bcw_labels$BCW_ID)]
+
+# add genus info to smash_dsn_cmp
+smash_dsn_cmp$Genus <- smash_lca_whole_genomes$genus[match(smash_dsn_cmp$bcw_id, smash_lca_whole_genomes$bcw_id)]
+
+# add tx_name Variable to smash_dsn_cmp
+smash_dsn_cmp$tx_name <- paste(smash_dsn_cmp$genus, sprintf("sp. %s", smash_dsn_cmp$bcw_id))
+
+# add BNF value
+smash_dsn_cmp$BNF <- pgp_15N$ratio[match(smash_dsn_cmp$bcw_id, pgp_15N$BCW_ID)]
+
+# set rownames to match sample
+rownames(smash_dsn_cmp) <- smash_dsn_cmp$tx_name
+
+# create matrices for tree
+
+## sourmash compare matrix
+smash_dsn_cmp_mat <- as.matrix(smash_dsn_cmp[,1:233])
+rownames(smash_dsn_cmp_mat) <- smash_dsn_cmp$tx_name
+colnames(smash_dsn_cmp_mat) <- rownames(smash_dsn_cmp_mat)
+
+```
+
+#### DSN tree objects
+```{r}
+# Create Phylo Tree from sourmash matrix
+
+smash_dsn_k31_tree_mat <- dist2(smash_dsn_cmp_mat)
+smash_dsn_k31_tree_fit <- hclust(smash_dsn_k31_tree_mat)
+smash_dsn_k31_phylo <- as.phylo(smash_dsn_k31_tree_fit)
+
+```
+
+
+#### DSN ggtree
+```{r}
+# Make tree
+sm_dsn_k31_tree <- ggtree(smash_dsn_k31_phylo,
+                          color = "black",
+                          size = 0.4,
+                          layout = "fan",
+                          open.angle = 15)
+
+```
+
+### Cowplot NIF Group ggtrees
+
+> Need to remove geom_tiplab for grid plotting
+
+##### DSP Isolates - no tip
+```{r}
+# Add gheatmap 0 for genus
+## reproducible colors
+bnf0_notip_dsp <- gheatmap(sm_dsp_k31_tree, smash_dsp_cmp[, "Genus", drop = F],
+                     offset = 0,
+                     width = 0.05,
+                     colnames_position = "top",
+                     colnames_angle = 0,
+                     colnames_offset_y = 3.5,
+                     font.size = 4.5,
+                     color = "grey50") + 
+  scale_fill_manual(values=c("#72A890",
+                             "#86D6E1",
+                             "#77E94F",
+                             "#E1ABAA",
+                             "#7BEFDF",
+                             "#DA47D2",
+                             "#CF7DDC"),
+                    name = "Genus",
+                    guide = guide_legend(
+                      direction = "vertical",
+                      ncol = 2,
+                      title.position = "top",
+                      title.theme = element_text(size = 18, hjust = 0.5),
+                      label.position = "right",
+                      label.theme = element_text(size = 14)
+                      )
+  ) +
+  theme(legend.title = element_text(), legend.key.size = unit(.5, "cm"))
+
+# Add gheatmap 1 for ACC
+bnf1_notip_dsp <- bnf0_notip_dsp + new_scale_fill()
+
+bnf2_notip_dsp <- gheatmap(bnf1_notip_dsp, smash_dsp_cmp[, "BNF", drop = F],
+                     offset = 0.2,
+                     width = 0.05,
+                     colnames_position = "top",
+                     colnames_angle = 0,
+                     colnames_offset_y = 3.5,
+                     font.size = 4.5,
+                     color = "grey50") + 
+  scale_fill_viridis_c(option="inferno",
+                       direction = -1,
+                       name = "BNF (15N/14N)",
+                       limits = c(0,5),
+                       breaks = c(0, 1, 2, 3, 4, 5),
+                       guide = guide_colorbar(
+                         direction = "horizontal",
+                         title.position = "top",
+                         title.theme = element_text(size = 18, hjust = 0.5),
+                         barwidth = 18,
+                         label.position = "bottom",
+                         label.theme = element_text(size = 14)
+                         )) +
+  theme(legend.title = element_text(), legend.position = "bottom")
+
+bnf_dsp_rot <- print(rotate_tree(bnf2_notip_dsp, -83))
+
+# save plot
+ggsave("./Plots/bnf_dsp_rot.pdf", bnf_dsp_rot, width = 22, height = 14)
+
+```
+
+##### SDS Isolates - no tip
+```{r}
+# Add gheatmap 0 for genus
+## reproducible colors
+bnf0_notip_sds <- gheatmap(sm_sds_k31_tree, smash_sds_cmp[, "Genus", drop = F],
+                     offset = 0,
+                     width = 0.05,
+                     colnames_position = "top",
+                     colnames_angle = 0,
+                     colnames_offset_y = 0.9,
+                     font.size = 4.5,
+                     color = "grey50") + 
+  scale_fill_manual(values=c("#E6BE53",
+                             "#CAD773",
+                             "#8F3EE4",
+                             "#D8E9D6",
+                             "#C59D6B",
+                             "#64E7A9",
+                             "#767CDE",
+                             "#E1ABAA",
+                             "#B4E3A7",
+                             "#CF7DDC"),
+                    name = "Genus",
+                    guide = guide_legend(
+                      direction = "vertical",
+                      ncol = 2,
+                      title.position = "top",
+                      title.theme = element_text(size = 18, hjust = 0.5),
+                      label.position = "right",
+                      label.theme = element_text(size = 14)
+                      )
+  ) +
+  theme(legend.title = element_text(), legend.key.size = unit(.5, "cm"))
+
+# Add gheatmap 1 for ACC
+bnf1_notip_sds <- bnf0_notip_sds + new_scale_fill()
+
+bnf2_notip_sds <- gheatmap(bnf1_notip_sds, smash_sds_cmp[, "BNF", drop = F],
+                     offset = 0.125,
+                     width = 0.05,
+                     colnames_position = "top",
+                     colnames_angle = 0,
+                     colnames_offset_y = 0.9,
+                     font.size = 4.5,
+                     color = "grey50") + 
+  scale_fill_viridis_c(option="inferno",
+                       direction = -1,
+                       name = "BNF (15N/14N)",
+                       limits = c(0,5),
+                       breaks = c(0, 1, 2, 3, 4, 5),
+                       guide = guide_colorbar(
+                         direction = "horizontal",
+                         title.position = "top",
+                         title.theme = element_text(size = 18, hjust = 0.5),
+                         barwidth = 18,
+                         label.position = "bottom",
+                         label.theme = element_text(size = 14)
+                         )) +
+  theme(legend.title = element_text(), legend.position = "bottom")
+
+bnf_sds_rot <- print(rotate_tree(bnf2_notip_sds, -85))
+
+# save plot
+ggsave("./Plots/bnf_sds_rot.pdf", bnf_sds_rot, width = 22, height = 14)
+
+```
+
+##### DSN Isolates - no tip
+```{r}
+# Add gheatmap 0 for genus
+## reproducible colors
+bnf0_notip_dsn <- gheatmap(sm_dsn_k31_tree, smash_dsn_cmp[, "Genus", drop = F],
+                     offset = 0,
+                     width = 0.05,
+                     colnames_position = "top",
+                     colnames_angle = 0,
+                     colnames_offset_y = 4.5,
+                     font.size = 4.35,
+                     color = "grey50") + 
+  scale_fill_manual(values=c("#CAD773",
+                             "#81D870",
+                             "#E25F9D",
+                             "#D8E9D6",
+                             "#72A890",
+                             "#CDEC4C",
+                             "#81748E",
+                             "#D3D0E3",
+                             "#7DAEDE",
+                             "#E2684F",
+                             "#E1ABAA",
+                             "#7BEFDF",
+                             "#D7A7DF",
+                             "#E5DEA8",
+                             "#CF7DDC"),
+                    name = "Genus",
+                    guide = guide_legend(
+                      direction = "vertical",
+                      ncol = 2,
+                      title.position = "top",
+                      title.theme = element_text(size = 18, hjust = 0.5),
+                      label.position = "right",
+                      label.theme = element_text(size = 14)
+                      )
+  ) +
+  theme(legend.title = element_text(), legend.key.size = unit(.5, "cm"))
+
+# Add gheatmap 1 for BNF
+bnf1_notip_dsn <- bnf0_notip_dsn + new_scale_fill()
+
+bnf2_notip_dsn <- gheatmap(bnf1_notip_dsn, smash_dsn_cmp[, "BNF", drop = F],
+                     offset = 0.22,
+                     width = 0.05,
+                     colnames_position = "top",
+                     colnames_angle = 0,
+                     colnames_offset_y = 4.5,
+                     font.size = 4.35,
+                     color = "grey50") + 
+  scale_fill_viridis_c(option="inferno",
+                       direction = -1,
+                       name = "BNF (15N/14N)",
+                       limits = c(0,5),
+                       breaks = c(0, 1, 2, 3, 4, 5),
+                       guide = guide_colorbar(
+                         direction = "horizontal",
+                         title.position = "top",
+                         title.theme = element_text(size = 18, hjust = 0.5),
+                         barwidth = 18,
+                         label.position = "bottom",
+                         label.theme = element_text(size = 14)
+                         )) +
+  theme(legend.title = element_text(), legend.position = "bottom")
+
+bnf_dsn_rot <- print(rotate_tree(bnf2_notip_dsn, -83))
+
+# save plot
+ggsave("./Plots/bnf_dsn_rot.pdf", bnf_dsn_rot, width = 22, height = 14)
+
+```
+
+### Extract legends for pgp plots
+#### Genus
+```{r}
+# Genus Tree
+cowplot_genus <- gheatmap(sm_k31_tree_o15, pgp_master[, "Genus", drop = F],
+                     offset = 0,
+                     width = 0.05,
+                     colnames_position = "top",
+                     colnames_angle = 0,
+                     colnames_offset_y = 9.5,
+                     font.size = 3.5,
+                     color = "grey50") + 
+  scale_fill_manual(values=c("#E6BE53",
+                             "#CAD773",
+                             "#81D870",
+                             "#8F3EE4",
+                             "#E25F9D",
+                             "#D8E9D6",
+                             "#72A890",
+                             "#CDEC4C",
+                             "#C59D6B",
+                             "#86D6E1",
+                             "#77E94F",
+                             "#81748E",
+                             "#64E7A9",
+                             "#D3D0E3",
+                             "#767CDE",
+                             "#7DAEDE",
+                             "#E2684F",
+                             "#E1ABAA",
+                             "#7BEFDF",
+                             "#DA47D2",
+                             "#D7A7DF",
+                             "#E5DEA8",
+                             "#B4E3A7",
+                             "#CF7DDC"),
+                    name = "Genus",
+                    guide = guide_legend(
+                      direction = "vertical",
+                      ncol = 3,
+                      title.position = "top",
+                      title.theme = element_text(size = 18, hjust = 0.5),
+                      label.position = "right",
+                      label.theme = element_text(size = 16)
+                      )) + theme(legend.title = element_text(),
+                                 legend.key.size = unit(0.75, "cm"))
+
+cowplot_genus
+
+legend_genus <- get_legend(cowplot_genus)
+```
+
+
+#### BNF
+```{r}
+cowplot_bnf <- gheatmap(sm_dsp_k31_tree, pgp_master[, "BNF", drop = F],
+                     offset = 00,
+                     width = 0.05,
+                     colnames_position = "top",
+                     colnames_angle = 0,
+                     colnames_offset_y = 2.25,
+                     font.size = 3.5,
+                     color = "grey50") + 
+  scale_fill_viridis_c(option="inferno",
+                       direction = -1,
+                       name = "BNF (15N/14N Ratio)",
+                       limits = c(0,5),
+                       breaks = c(0, 1, 2, 3, 4, 5),
+                       guide = guide_colorbar(
+                         direction = "horizontal",
+                         title.position = "top",
+                         title.theme = element_text(size = 18, hjust = 0.5),
+                         barwidth = 18,
+                         label.position = "bottom",
+                         label.theme = element_text(size = 14)
+                         )) +
+  theme(legend.title = element_text(), legend.position = "bottom")
+
+cowplot_bnf
+
+legend_bnf <- get_legend(cowplot_bnf)
+
+```
+
+### Assay Legend Array
+```{r}
+
+bnf_legend_array_1 <- plot_grid(legend_genus,
+                              legend_bnf,
+                              nrow = 2)
+
+bnf_legend_array_1
+
+```
+
+#### Plot Grid
+
+
+```{r}
+bnf_row <- plot_grid(bnf_dsp_rot + theme(plot.margin = unit(c(0, 0, 0, 0), "cm"),
+                                         legend.position = "none"),
+                     bnf_sds_rot + theme(plot.margin = unit(c(0, 0, 0, 0), "cm"),
+                                         legend.position = "none"),
+                     bnf_dsn_rot + theme(plot.margin = unit(c(0, 0, 0, 0), "cm"),
+                                         legend.position = "none"),
+                     bnf_legend_array_1,
+                     labels = c("A", "B", "C", ""),
+                     label_size = 24,
+                     nrow = 2,
+                     ncol = 2,
+                     vjust = 3,
+                     align = 'vh'
+                     )
+
+#pgp_grid <- plot_grid(pgp_row, pgp_all_legend,
+#                    ncol = 1,
+#                    rel_heights = c(1, 0.5))
+bnf_row
+
+ggsave("./plots/Fig4.pdf", bnf_row, width = 22, height = 14)
+```
+
+### BNF Assay Summary
+
+#### Min and Max BNF values
+```{r}
+print("For all single isolate BNF phenotypes,")
+print("The min 15N ratio is:")
+min(pgp_master[,"BNF"], na.rm = T)
+print("The max 15N ratio is:")
+max(pgp_master[,"BNF"], na.rm = T)
+```
+
+#### NIF Group Summary
+```{r}
+
+# DSP Group
+## N15 < 1
+smash_dsp_cmp %>%
+  group_by(Genus, N15) %>%
+  select(N15) %>%
+  filter(N15 < 1) %>%
+  count()
+
+## 1 <= N15 <= 2
+smash_dsp_cmp %>%
+  group_by(Genus, N15) %>%
+  select(N15) %>%
+  filter(N15 >= 1 & N15 <=2) %>%
+  count()
+
+## N15 >= 2
+smash_dsp_cmp %>%
+  group_by(Genus, N15) %>%
+  select(N15) %>%
+  filter(N15 >= 2) %>%
+  count()
+
+# SDS Group
+## N15 < 1
+smash_sds_cmp %>%
+  group_by(Genus, N15) %>%
+  select(N15) %>%
+  filter(N15 < 1) %>%
+  count()
+
+## 1 <= N15 <= 2
+smash_sds_cmp %>%
+  group_by(Genus, N15) %>%
+  select(N15) %>%
+  filter(N15 >= 1 & N15 <2) %>%
+  count()
+
+## N15 >= 2
+smash_sds_cmp %>%
+  group_by(Genus, N15) %>%
+  select(N15) %>%
+  filter(N15 >= 2) %>%
+  count()
+
+# DSN Group
+## N15 < 1
+smash_dsn_cmp %>%
+  group_by(Genus, N15) %>%
+  select(N15) %>%
+  filter(N15 < 1) %>%
+  count()
+
+## 1 <= N15 <= 2
+smash_dsn_cmp %>%
+  group_by(Genus, N15) %>%
+  select(N15) %>%
+  filter(N15 >= 1 & N15 <2) %>%
+  count()
+
+## N15 >= 2
+smash_dsn_cmp %>%
+  group_by(Genus, N15) %>%
+  select(N15) %>%
+  filter(N15 >= 2) %>%
+  count()
+```
